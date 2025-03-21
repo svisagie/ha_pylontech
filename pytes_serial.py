@@ -33,7 +33,7 @@ cells                  = int(config.get('battery_info', 'cells'))
 dev_name              = config.get('battery_info', 'dev_name')
 manufacturer          = config.get('battery_info', 'manufacturer')
 model                 = config.get('battery_info', 'model')
-sw_ver                = "PytesSerial v0.8.0_20241107"
+sw_ver                = "PytesSerial v0.9.0_20250321"
 version               = sw_ver
 
 if reading_freq < 5  : reading_freq = 5
