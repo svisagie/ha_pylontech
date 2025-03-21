@@ -1,0 +1,122 @@
+Local command:
+adc      Addr show - adc
+bat      Battery data show - bat [pwr][index]
+bmicbld  BMIC Soft Bleed Ctrl - bmicbld [chip][Val]
+bmicd    BMIC data show - bmicd [chip]
+bmice    Setup BMIC - bmice [chip]
+bmicr    BMIC read - bmicr [chip][Offset]
+bmicsh   BMIC show reg -bmicsh [chip]
+bmicw    BMIC write - bmicw [chip][Offset][Val]
+ci       Current Comm Info
+cmdquit  Quit the Console Mode
+config   config [pov/povr/phv/phvr/plv/plvr/puv/puvr/pslp/bov/bovr/bhv/bhvr/blv/blvr/buv/buvr/bslp/bsv/bv
+ /cot/cotr/cht/chtr/clt/cltr/cut/cutr/dot/dotr/dht/dhtr/dlt/dltr/dut/dutr/coc/coca/cocar
+ /eot/eotr/eht/ehtr/elt/eltr/eut/eutr/doc/doca/docar/ocd/ocr/sc/scd/scr/clc
+ /recinv/shuttime/uvtime/save/default][val]
+ /[sleep/record][on/off/day/week/month][starttime][endtime]
+ /[hwsleep][<on/off>][sleeptime][wakeuptime]
+ct       Track Comm Port Data [Port Number]
+ctrl     Contrl IO - ctrl [cfet/dfet/buzz/heat] [on/off]
+data     History data load - data [event/history/misc][item]
+datac    Clear data - datac [event/history/misc]
+datalist Show recorded data - datalist [event/history/misc][item/bat][batnun][volt/curr/temp/coul][item]
+disp     Display Info at regular intervals - disp [(pwrs pwrNo)/val]/[(bats batNo)/volt/curr/temp]
+eepe     EEPROM erase - eepe [chip]
+eepr     EEPROM read - eepr [chip][Offset][size]
+eepw     EEPROM write - eepw [chip][Offset][Val][size]
+flae     Extend flash erase - flae [chip]
+flar     Extend flash read - flar [chip][Offset][size]
+flaw     Extend flash write - flaw [chip][Offset][Val]
+fullchg  Show FullCharge Info - fullchg [time]
+getpwr   Get power Info - getpwr
+help     Help [cmd]
+info     Device infomation - info
+log      Log information show - log
+login    Login Admin mode - login [password]
+logc     Log clear - logc
+logout   user mode  - logout
+logt     Log test - logt [data]
+md       Memory dump - md [width][Addr][size]
+mm       Memory set - mm [width][Addr][Val]
+prot     Protect ctrl - prot [bov/bhv/blv/buv/pov/phv/plv/puv/cbot/cbht/cblt/cbut/dbot/dbht/dblt/dbut/pot/pht/plt/put/coc/coc2/coca/doc/doc2/doca/sc/buzz/smartchg/default][en/dis]
+pwr      Power data show - pwr [index]
+re       Send Command To the Specified Power - re [addr][command]
+rtcr     RTC read - rtcr [Offset]
+rtcw     RTC write - rtcw [Offset][Val]
+rtcsh    RTC show reg -rtcsh
+save     Save data - save [event/history]
+socr     SOC read - socr[Offset]
+socw     SOC write - socw [Offset][Val]
+socsh    SOC show reg -socsh
+soccfg   SOC config - soccfg[subclass][Offset][value]
+soccal   SOC calibration - soccal [volt/current/tempr/ccoffset/bdoffset] [value]
+socd     SOC show data - socd
+tsoc     bq34z100 test - tsoc
+socclr   clear bq34z100 data flash  and reload default value - socclr
+soct     SOC show Ra table - soct
+couls    Coulomb calc type - couls [iah/vah/asic/default]
+shut     Shut down - shut
+soh      State of health - soh [addr]
+stat     Statistic data show - stat
+statc    Clear statistic - statc
+tbar     Test write Barcode - tbar[reg]
+tbmic    Max17830 test - tbmic
+tbuz     Test Buzzer - tbuz
+tchgc    test Charge current - tchgc
+tclear   test clear record on chip- tclear
+tpv      Test pack volt - tpv
+tdct     Test dry ct - tdct
+tibcio   Test ibc io - tibcio [nc/sc]
+tdip     Test Dip - tdip [flag]
+tdisc    test discharge current - tdisc
+teepr    Device EEPROM test - teepr
+tetmp    test enviroment temperature - tetmp
+tflash   Device Flash test - tflash
+ti2c     I2C test - ti2c
+time     Time - time [year] [month] [day] [hour] [minute] [second]
+tinput   test input state - tinput [rv/dcov/absent/present]
+tled     Test Led - tled
+tmos     test mosfet - tmos [cfet/dfet]
+tcan     Test can port - tcan [port#]
+tmpicr   TMPR IC read - tmpicr [Offset]
+tmpicw   TMPR IC write - tmpicw [Offset][Val]
+tmpicd   TMPR IC data show - tmpicd
+tmpicsh  TMPR IC Reg Show - tmpicsh
+tmprctrl Bat tmpr ctrl - tmprctrl [flag]/[flag][batid][val]
+trst     Test Soft Reset - trst
+tpwr     test the total voltage of the power - tpwr
+tsoh     test soh - tsoh
+tspi     SPI test - tspi
+ttmp     test battery temperature - ttmp
+tusart   Usart test - tusart
+tbld     Test bleeding - tbld [val]
+updata   updata system - updata
+tvolt    test battery voltage - tvolt
+twdg     Stop feeding watchdog - wdg
+emptyvolt Set empty volt - emptyvolt [val]
+blocksoc set block soc - blocksoc [val]
+pwrsys   power system info display
+setprt   set protocol type - setprt [solax/lg]
+urates   Get R485 Port Rate - urates
+tagevolt test age volt
+trdagevolt read age volt
+**********************************************************
+Remote command:
+config   config [pov/povr/phv/phvr/plv/plvr/puv/puvr/pslp/bov/bovr/bhv/bhvr/blv/blvr/buv/buvr/bslp/bsv/bv
+ /cot/cotr/cht/chtr/clt/cltr/cut/cutr/dot/dotr/dht/dhtr/dlt/dltr/dut/dutr/coc/coca/cocar
+ /eot/eotr/eht/ehtr/elt/eltr/eut/eutr/doc/doca/docar/ocd/ocr/sc/scd/scr/clc
+ /recinv/shuttime/uvtime/save/default][val]
+ /[sleep/record][on/off/day/week/month][starttime][endtime]
+ /[hwsleep][<on/off>][sleeptime][wakeuptime]
+ctrl     Contrl IO - ctrl [cfet/dfet/buzz/heat] [on/off]
+data     History data load - data [event/history/misc][item]
+emptyvolt Set empty volt - emptyvolt [val]
+info     Device infomation - info
+login    Login Admin mode - login [password]
+logout   user mode  - logout
+prot     Protect ctrl - prot [bov/bhv/blv/buv/pov/phv/plv/puv/cbot/cbht/cblt/cbut/dbot/dbht/dblt/dbut/pot/pht/plt/put/coc/coc2/coca/doc/doc2/doca/sc/buzz/smartchg/default][en/dis]
+soh      State of health - soh [addr]
+stat     Statistic data show - stat
+statc    Clear statistic - statc
+Command completed successfully
+$$

@@ -1,0 +1,15 @@
+services:
+  pylon_to_mqtt:
+    container_name: pylon_to_mqtt
+    image: pytes_serial
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+    volumes:
+      - ./pytes_serial.cfg:/app/pytes_serial.cfg
+    devices:
+      - /dev/serial/by-id/usb-FTDI_FT231X_USB_UART_D30F0GP2-if00-port0:/dev/ttyUSB0
+    environment:
+      TZ: "Africa/Johannesburg"

@@ -1,0 +1,21 @@
+bat 2
+@
+Battery  Volt     Curr     Tempr    Base State   Volt. State  Curr. State  Temp. State  Coulomb
+0        3258     -32      26000    Dischg       Normal       Normal       Normal        39%      29329 mAH
+1        3259     -60      26000    Dischg       Normal       Normal       Normal        39%      29329 mAH
+2        3255     -60      26000    Dischg       Normal       Normal       Normal        39%      29329 mAH
+3        3261     -60      26000    Dischg       Normal       Normal       Normal        39%      29329 mAH
+4        3261     -60      26000    Dischg       Normal       Normal       Normal        39%      29329 mAH
+5        3260     -60      26000    Dischg       Normal       Normal       Normal        39%      29329 mAH
+6        3259     -60      26000    Dischg       Normal       Normal       Normal        39%      29329 mAH
+7        3255     -60      26000    Dischg       Normal       Normal       Normal        39%      29329 mAH
+8        3258     -60      26000    Dischg       Normal       Normal       Normal        39%      29329 mAH
+9        3257     -60      26000    Dischg       Normal       Normal       Normal        39%      29329 mAH
+10       3258     -60      26000    Dischg       Normal       Normal       Normal        39%      29329 mAH
+11       3258     -60      26000    Dischg       Normal       Normal       Normal        39%      29329 mAH
+12       3264     -60      26000    Dischg       Normal       Normal       Normal        39%      29329 mAH
+13       3259     -60      26000    Dischg       Normal       Normal       Normal        39%      29329 mAH
+14       3259     -60      26000    Dischg       Normal       Normal       Normal        39%      29329 mAH
+Command completed successfully
+$$
+pylon_debug>

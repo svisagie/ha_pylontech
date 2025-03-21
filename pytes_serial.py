@@ -6,9 +6,20 @@ import time, datetime
 import json
 import mysql.connector as mariadb
 from configparser import ConfigParser
-import paho.mqtt.publish as publish
+import paho.mqtt.client as mqtt 
+from paho.mqtt.client import CallbackAPIVersion
 import re
+import os
 
+# Get the current working directory
+current_working_directory = os.getcwd()
+
+# Check if config file exists
+config_file = os.path.join(current_working_directory, 'pytes_serial.cfg')
+if not os.path.exists(config_file):
+    print(f"Config file '{config_file}' not found. Exiting.")
+    exit(1)
+    
 # ---------------------------variables initialization----------
 config                = ConfigParser()
 config.read('pytes_serial.cfg')
@@ -25,7 +36,7 @@ model                 = config.get('battery_info', 'model')
 sw_ver                = "PytesSerial v0.8.0_20241107"
 version               = sw_ver
 
-if reading_freq < 10  : reading_freq = 10
+if reading_freq < 5  : reading_freq = 5
 
 SQL_active            = config.get('Maria DB connection', 'SQL_active')
 host                  = config.get('Maria DB connection', 'host')
@@ -70,6 +81,8 @@ line_str_array        = []                                  # type: list[str] # 
 bat_events_no         = 0                                   # used to count numbers of battery events
 pwr_events_no         = 0                                   # used to count numbers of power events
 sys_events_no         = 0                                   # used to count numbers of system events
+parsing_stat_lastexec = 0                                   # used to calculate parsing_stat execution times
+parsing_stat_interval = 21600                               # used to calculate parsing_stat execution times in seconds
 
 power_events_list = {
 0:["info","0x0","No events"],
@@ -123,18 +136,21 @@ sys_events_list = {
 2048:["warning","0x800","Discharge MOS FAIL"]
 }
 
-print("software version:",version)
-
 # ------------------------logging definiton ----------------------------
 formatter = logging.Formatter('%(asctime)s| %(levelname)7s| %(message)s ',datefmt='%Y%m%d %H:%M:%S') # logging formating
 def setup_logger(name, log_file, level=LOGGING_LEVEL_FILE):
 
     """To setup as many loggers as you want"""
-    handler = RotatingFileHandler(log_file, mode='a', maxBytes=LOGGING_FILE_MAX_SIZE*1000, backupCount=LOGGING_FILE_MAX_FILES, encoding=None, delay=False)
-    handler.setFormatter(formatter)
+    fileHandler = RotatingFileHandler(log_file, mode='a', maxBytes=LOGGING_FILE_MAX_SIZE*1000, backupCount=LOGGING_FILE_MAX_FILES, encoding=None, delay=False)
+    fileHandler.setFormatter(formatter)
+    
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)  
+
     logger = logging.getLogger(name)
     logger.setLevel(level)
-    logger.addHandler(handler)
+    logger.addHandler(fileHandler)
+    logger.addHandler(console_handler)
 
     return logger
 
@@ -149,7 +165,7 @@ def serial_write(req, size):
         if ser.is_open != True:
             ser.open()
             time.sleep(0.5)
-            print ('...open serial')
+            pytes_serial_log.debug ('...open serial')
 
         ser.reset_input_buffer()
         ser.reset_output_buffer()
@@ -161,7 +177,7 @@ def serial_write(req, size):
 
         while True:
             if ser.in_waiting > size:
-                print ('...writing complete, in buffer: ', ser.in_waiting , round((time.time() - loop_time),2))
+                pytes_serial_log.debug (f'...writing complete, in buffer: {ser.in_waiting}, {round((time.time() - loop_time),2)}')
                 return "true"
 
             elif (time.time() - loop_time) > 1:
@@ -179,7 +195,6 @@ def serial_write(req, size):
                 time.sleep(0.1)
 
     except Exception as e:
-        print('...serial write error: '+ str(e))
         pytes_serial_log.warning ('SERIAL WRITE - error handling message: '+ str(e))
 
 def serial_read(start,stop):
@@ -191,7 +206,7 @@ def serial_read(start,stop):
         if ser.is_open != True:
             ser.open()
             time.sleep(0.5)
-            print ('...open serial')
+            pytes_serial_log.debug ('...open serial')
 
         while True:
             if ser.in_waiting > 0:
@@ -216,11 +231,125 @@ def serial_read(start,stop):
         return stop
 
     except Exception as e:
-        print('...serial read error: ' + str(e))
         pytes_serial_log.warning ('SERIAL READ - error handling message: ' + str(e))
         pytes_serial_log.debug ('SERIAL READ - line:' + str(line)  + ' line_str_array: ' + str(line_str_array))
 
         line_str_array = []
+
+def parsing_pwrsys():
+    try:
+        global line_str_array
+        global banks_total              
+        global banks_current            
+        global banks_sleep              
+        global system_voltage              
+        global system_current           
+        global system_rc                
+        global system_fcc              
+        global system_soc               
+        global system_soh               
+        global system_highest_voltage   
+        global system_average_voltage   
+        global system_lowest_voltage    
+        global system_highest_temp      
+        global system_average_temp      
+        global system_lowest_temp       
+        global system_recommend_chg_volt
+        global system_recommend_dsg_volt
+        global system_recommend_chg_curr
+        global system_recommend_dsg_curr
+
+        banks_total = 0
+        banks_current = 0
+        banks_sleep = 0
+        system_voltage = 0
+        system_current = 0
+        system_rc = 0
+        system_fcc = 0
+        system_soc = 0
+        system_soh = 0
+        system_highest_voltage = 0
+        system_average_voltage = 0
+        system_lowest_voltage = 0
+        system_highest_temp = 0
+        system_average_temp = 0
+        system_lowest_temp = 0
+        system_recommend_chg_volt = 0
+        system_recommend_dsg_volt = 0
+        system_recommend_chg_curr = 0
+        system_recommend_dsg_curr = 0
+        
+        req  = ('pwrsys')
+        size = 1000
+        write_return = serial_write(req,size)
+
+        if write_return != 'true':
+            return "false"
+
+        read_return = serial_read('Power System Information','Command completed')
+
+        if read_return != 'true' or not line_str_array:
+            return "false"
+
+        for line_str in line_str_array:
+            #parsing data
+            if line_str[1:27] == 'Total Num                :': banks_total                  = int(line_str[28:29])
+            if line_str[1:27] == 'Present Num              :': banks_current                = int(line_str[28:29])
+            if line_str[1:27] == 'Sleep Num                :': banks_sleep                  = int(line_str[28:29])
+            if line_str[1:27] == 'System Volt              :': system_voltage               = round(int(line_str[28:33])/1000, 3)
+            if line_str[1:27] == 'System Curr              :': system_current               = round(int(line_str[28:36])/1000, 3)
+            if line_str[1:27] == 'System RC                :': system_rc                    = round(int(line_str[28:36])/1000, 3)
+            if line_str[1:27] == 'System FCC               :': system_fcc                   = round(int(line_str[28:36])/1000, 3)
+            if line_str[1:27] == 'System SOC               :': system_soc                   = int(line_str[28:32])
+            if line_str[1:27] == 'System SOH               :': system_soh                   = int(line_str[28:32])
+            if line_str[1:27] == 'Highest voltage          :': system_highest_voltage       = round(int(line_str[28:36])/1000, 3)
+            if line_str[1:27] == 'Average voltage          :': system_average_voltage       = round(int(line_str[28:36])/1000, 3)
+            if line_str[1:27] == 'Lowest voltage           :': system_lowest_voltage        = round(int(line_str[28:36])/1000, 3)
+            if line_str[1:27] == 'Highest temperature      :': system_highest_temp          = round(int(line_str[28:36])/1000, 3)
+            if line_str[1:27] == 'Average temperature      :': system_average_temp          = round(int(line_str[28:36])/1000, 3)
+            if line_str[1:27] == 'Lowest temperature       :': system_lowest_temp           = round(int(line_str[28:36])/1000, 3)
+            if line_str[1:27] == 'Recommend chg voltage    :': system_recommend_chg_volt    = round(int(line_str[28:36])/1000, 3)
+            if line_str[1:27] == 'Recommend dsg voltage    :': system_recommend_dsg_volt    = round(int(line_str[28:36])/1000, 3)
+            if line_str[1:27] == 'Recommend chg current    :': system_recommend_chg_curr    = round(int(line_str[28:36])/1000, 3)
+            if line_str[1:27] == 'Recommend dsg current    :': system_recommend_dsg_curr    = round(int(line_str[28:36])/1000, 3)
+
+            if line_str[1:18] == 'Command completed':   # mark end of the block
+                try:
+                    pytes_serial_log.debug ('--------- PWRSYS ----------')
+                    pytes_serial_log.debug (f'banks_total               : {banks_total}')
+                    pytes_serial_log.debug (f'banks_current             : {banks_current}')
+                    pytes_serial_log.debug (f'banks_sleep               : {banks_sleep}')
+                    pytes_serial_log.debug (f'system_volt               : {system_voltage}')
+                    pytes_serial_log.debug (f'system_current            : {system_current}')
+                    pytes_serial_log.debug (f'system_rc                 : {system_rc}')
+                    pytes_serial_log.debug (f'current_fcc               : {system_fcc}')
+                    pytes_serial_log.debug (f'system_soc                : {system_soc}')
+                    pytes_serial_log.debug (f'system_soh                : {system_soh}')
+                    pytes_serial_log.debug (f'system_highest_voltage    : {system_highest_voltage}')
+                    pytes_serial_log.debug (f'system_average_voltage    : {system_average_voltage}')
+                    pytes_serial_log.debug (f'system_lowest_voltage     : {system_lowest_voltage}')
+                    pytes_serial_log.debug (f'system_highest_temp       : {system_highest_temp}')
+                    pytes_serial_log.debug (f'system_average_temp       : {system_average_temp}')
+                    pytes_serial_log.debug (f'system_lowest_temp        : {system_lowest_temp}')
+                    pytes_serial_log.debug (f'system_recommend_chg_volt : {system_recommend_chg_volt}')
+                    pytes_serial_log.debug (f'system_recommend_dsg_volt : {system_recommend_dsg_volt}')
+                    pytes_serial_log.debug (f'system_recommend_chg_curr : {system_recommend_chg_curr}')
+                    pytes_serial_log.debug (f'system_recommend_dsg_curr : {system_recommend_dsg_curr}')
+                    pytes_serial_log.debug ('---------------------------')
+
+                    line_str_array = []
+                    line_str       = ""
+
+                    break
+
+                except Exception as e:
+                    pytes_serial_log.warning ('PARSING SERIAL - error handling message: '+str(e))
+
+        pytes_serial_log.debug ('...parsing_pwrsys: ok')                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
+        return "true"
+
+    except Exception as e:
+        pytes_serial_log.info ('PARSING BAT - error handling message: ' + str(e))
 
 def parsing_serial():
     try:
@@ -274,7 +403,7 @@ def parsing_serial():
                     errors = 'true'
                     buffer     = ser.in_waiting
 
-                    print ('...timeouts -> close serial, skip set')
+                    pytes_serial_log.debug ('...timeouts -> close serial, skip set')
                     pytes_serial_log.error ('PARSING SERIAL - power:' + str(power)  + ' rw_trial:' + str(rw_trials) + ' err_no:' + str(errors_no) + \
                     ' timeouts -> close serial in_buffer:' + str(buffer) + ' < ' + str(size) + ' line_str_array: ' + str(line_str_array))
 
@@ -310,22 +439,22 @@ def parsing_serial():
                     if line_str[1:18] == 'Command completed':   # mark end of the block
                         try:
                             decode ='false'
-                            print ('power           :', power)
-                            print ('voltage         :', voltage)
-                            print ('current         :', current)
-                            print ('temperature     :', temp)
-                            print ('soc [%]         :', soc)
-                            print ('basic_st        :', basic_st)
-                            print ('volt_st         :', volt_st)
-                            print ('current_st      :', current_st)
-                            print ('temp_st         :', temp_st)
-                            print ('coul_st         :', coul_st)
-                            print ('soh_st          :', soh_st)
-                            print ('heater_st       :', heater_st)
-                            print ('bat_events      :', bat_events)
-                            print ('power_events    :', power_events)
-                            print ('sys_fault       :', sys_events)
-                            print ('---------------------------')
+                            pytes_serial_log.debug (f'power           : {power}')
+                            pytes_serial_log.debug (f'voltage         : {voltage}')
+                            pytes_serial_log.debug (f'current         : {current}')
+                            pytes_serial_log.debug (f'temperature     : {temp}')
+                            pytes_serial_log.debug (f'soc [%]         : {soc}')
+                            pytes_serial_log.debug (f'basic_st        : {basic_st}')
+                            pytes_serial_log.debug (f'volt_st         : {volt_st}')
+                            pytes_serial_log.debug (f'current_st      : {current_st}')
+                            pytes_serial_log.debug (f'temp_st         : {temp_st}')
+                            pytes_serial_log.debug (f'coul_st         : {coul_st}')
+                            pytes_serial_log.debug (f'soh_st          : {soh_st}')
+                            pytes_serial_log.debug (f'heater_st       : {heater_st}')
+                            pytes_serial_log.debug (f'bat_events      : {bat_events}')
+                            pytes_serial_log.debug (f'power_events    : {power_events}')
+                            pytes_serial_log.debug (f'sys_fault       : {sys_events}')
+                            pytes_serial_log.debug ('---------------------------')
 
                             pwr_array = {
                                         'power': power,
@@ -343,7 +472,7 @@ def parsing_serial():
                                         'bat_events': bat_events,
                                         'power_events': power_events,
                                         'sys_events': sys_events}
-
+                            
                             data_set       = data_set +1
                             pwr.append(pwr_array)
                             line_str_array = []
@@ -362,20 +491,20 @@ def parsing_serial():
             errors='false'
             trials=0
 
-            print ('...serial parsing: ok')
+            pytes_serial_log.debug ('...serial parsing: ok')
 
         else:
             errors = 'true'
             trials = trials+1
 
             if trials <= 3:
-                print ('...incomplete data sets -> try again')
+                pytes_serial_log.debug ('...incomplete data sets -> try again')
                 pytes_serial_log.debug ('PARSING SERIAL - power:' + str(power) + ' trial:' + str(trials) + ' err_no:' + str(errors_no) + ' incomplete data sets data set:' + str(data_set)  + ' line_str_array:' + str(line_str_array_bak))
 
                 parsing_serial()
 
             else:
-                print ('...incomplete data set -> not solved, close serial, skip set')
+                pytes_serial_log.debug ('...incomplete data set -> not solved, close serial, skip set')
                 pytes_serial_log.error ('PARSING SERIAL - power:' + str(power) + ' trial:' + str(trials) + ' err_no:'+str(errors_no) + ' incomplete data sets: ' + str(data_set)  + ' line_str_array:' + str(line_str_array_bak))
 
                 if ser.is_open == True:
@@ -386,12 +515,11 @@ def parsing_serial():
     except Exception as e:
         errors = 'true'
 
-        print('...parsing serial error: ' + str(e))
         pytes_serial_log.error ('PARSING SERIAL - error handling message: '+str(e))
 
         if ser.is_open == True:
             ser.close()
-            print ('...close serial')
+            pytes_serial_log.debug ('...close serial')
 
         return
 
@@ -421,7 +549,7 @@ def statistics():
         
     except Exception as e:
         errors = 'true'
-        print('...json serialization error: ' + str(e))
+        pytes_serial_log.exception ('...json serialization error: ' + str(e))
 
 def json_serialize():
     try:
@@ -438,11 +566,26 @@ def json_serialize():
 
         json_data_old = json_data
         json_data={'relay_local_time':TimeStamp,
-                   'powers' : powers,
-                   'voltage': sys_voltage,
-                   'current': sys_current,
+                   'powers' : banks_current,
+                   'powers_total' : banks_total,
+                   'powers_sleep' : banks_sleep,
+                   'voltage': system_voltage,
+                   'current': system_current,
+                   'system_rc': system_rc,
+                   'system_fcc': system_fcc,
                    'temperature': sys_temp,
-                   'soc': sys_soc,
+                   'soc': system_soc,
+                   'soh': system_soh,
+                   'highest_voltage': system_highest_voltage,
+                   'average_voltage': system_average_voltage,
+                   'lowest_voltage': system_lowest_voltage,
+                   'highest_temp': system_highest_temp,
+                   'average_temp': system_average_temp,
+                   'lowest_temp': system_lowest_temp,
+                   'recommend_chg_volt': system_recommend_chg_volt,
+                   'recommend_dsg_volt': system_recommend_dsg_volt,
+                   'recommend_chg_curr': system_recommend_chg_curr,
+                   'recommend_dsg_curr': system_recommend_dsg_curr,
                    'basic_st': sys_basic_st,
                    'devices':pwr,
                    'cells_data':bats,
@@ -458,10 +601,9 @@ def json_serialize():
 
         with open(output_path + dev_name + '_status.json', 'w') as outfile:
             json.dump(json_data, outfile)
-        print('...json creation:  ok')
+        pytes_serial_log.debug ('...json creation:  ok')
 
     except Exception as e:
-        print('...json serialization error: ' + str(e))
         pytes_serial_log.error ('JSON SERIALIZATION - error handling message: ' + str(e))
 
         errors = 'true'
@@ -509,10 +651,10 @@ def maria_db():
 
         mycursor.close()
         mydb.close()
-        print ('...mariadb upload: ok')
+        pytes_serial_log.debug ('...mariadb upload: ok')
 
     except Exception as e:
-        print('...mariadb writing error: '+ str(e))
+        pytes_serial_log.debug ('...mariadb writing error: '+ str(e))
         pytes_serial_log.warning ('MARIADB WRITING - error handling message: '+ str(e))
 
 def mqtt_discovery():
@@ -520,17 +662,13 @@ def mqtt_discovery():
         config    = 1
         max_config= 0
         msg       = {}
-        MQTT_auth = None # type: publish.AuthParameter | None
-
-        if len(MQTT_username) > 0:
-            MQTT_auth = { 'username': MQTT_username, 'password': MQTT_password }
 
         # define system sensors
-        names        =["current",       "voltage" ,     "temperature",  "soc",          "status"]
-        ids          =["current",       "voltage" ,     "temperature",  "soc",          "basic_st"]
-        dev_cla      =["current",       "voltage",      "temperature",  "battery",      None]
-        stat_cla     =["measurement",   "measurement",  "measurement",  "measurement",  None]
-        unit_of_meas =["A",             "V",            "°C",           "%",            None]
+        names        =["Current",       "Voltage" ,     "Temperature",  "SOC",          "Status",   "Remaining Capacity",   "Full Charge Capacity",   "System SOH",      "Last update"]
+        ids          =["current",       "voltage" ,     "temperature",  "soc",          "basic_st", "system_rc",            "system_fcc",             "soh",             "relay_local_time"]
+        dev_cla      =["current",       "voltage",      "temperature",  "battery",      None,       "battery",              "battery",                "battery",         "timestamp"]
+        stat_cla     =["measurement",   "measurement",  "measurement",  "measurement",  None,       "measurement",          "measurement",            "measurement",     None]
+        unit_of_meas =["A",             "V",            "°C",           "%",            None,       "AH",                   "AH",                     "%",               None]
 
         max_config   = max_config + len(ids)
 
@@ -550,7 +688,7 @@ def mqtt_discovery():
             msg ["dev"]          = {"identifiers": [dev_name],"manufacturer": manufacturer,"model": model,"name": dev_name,"sw_version": sw_ver}
             message              = json.dumps(msg)
 
-            publish.single(state_topic, message, hostname=MQTT_broker, port= MQTT_port, auth=MQTT_auth, qos=0, retain=True)
+            client.publish(state_topic, message, retain=True)
 
             b = "...mqtt auto discovery - system sensors:" + str(round(config/max_config *100)) +" %"
             print (b, end="\r")
@@ -558,14 +696,14 @@ def mqtt_discovery():
             msg                  = {}
             config               = config +1
 
-        print("...mqtt auto discovery")
+        pytes_serial_log.debug ("...mqtt auto discovery")
 
         # define individual batteries sensors
-        names        =["current",       "voltage" ,     "temperature",  "soc",          "status"]
-        ids          =["current",       "voltage" ,     "temperature",  "soc",          "basic_st"]
-        dev_cla      =["current",       "voltage",      "temperature",  "battery",      None]
-        stat_cla     =["measurement",   "measurement",  "measurement",  "measurement",  None]
-        unit_of_meas =["A",             "V",            "°C",           "%",            None]
+        names        =["Current",       "Voltage" ,     "Temperature",  "SOC",          "Status",   "Cycles"]
+        ids          =["current",       "voltage" ,     "temperature",  "soc",          "basic_st", "cycle_times"]
+        dev_cla      =["current",       "voltage",      "temperature",  "battery",      None,       None]
+        stat_cla     =["measurement",   "measurement",  "measurement",  "measurement",  None,       None]
+        unit_of_meas =["A",             "V",            "°C",           "%",            None,       None]
 
         max_config   = max_config + powers*len(ids)
 
@@ -586,7 +724,7 @@ def mqtt_discovery():
                 msg ["dev"]          = {"identifiers": [dev_name],"manufacturer": manufacturer,"model": model,"name": dev_name,"sw_version": sw_ver}
                 message              = json.dumps(msg)
 
-                publish.single(state_topic, message, hostname=MQTT_broker, port= MQTT_port, auth=MQTT_auth, qos=0, retain=True)
+                client.publish(state_topic, message, retain=True)
 
                 b = "...mqtt auto discovery - battery sensors:" + str(round(config/max_config *100)) +" %"
                 print (b, end="\r")
@@ -595,7 +733,7 @@ def mqtt_discovery():
                 config               = config +1
                 #max_config           = len(ids)+ powers*len(ids)
 
-        print("...mqtt auto discovery")
+        pytes_serial_log.debug ("...mqtt auto discovery")
 
         # define individual cells sensors
         if cells_monitoring == 'true':
@@ -646,7 +784,7 @@ def mqtt_discovery():
                         msg ["dev"]          = {"identifiers": [dev_name+"_cells"],"manufacturer": manufacturer,"model": model,"name": dev_name+"_cells","sw_version": sw_ver}
                         message              = json.dumps(msg)
 
-                        publish.single(state_topic, message, hostname=MQTT_broker, port= MQTT_port, auth=MQTT_auth, qos=0, retain=True)
+                        client.publish(state_topic, message, retain=True)
 
                         b = "...mqtt auto discovery - cell sensors:" + str(round(config/max_config *100)) +" %"
                         print (b, end="\r")
@@ -657,7 +795,7 @@ def mqtt_discovery():
             # only for medium and high monitoring level
             if cells_mon_level == 'medium' or cells_mon_level == 'high':
                 
-                print("...mqtt auto discovery")
+                pytes_serial_log.debug ("...mqtt auto discovery")
                 
                 # define individual cells sensors -- statistics
                 names        =["voltage_delta", "voltage_min",  "voltage_max",  "temperature_delta",    "temperature_min",  "temperature_max"]
@@ -685,7 +823,7 @@ def mqtt_discovery():
                         msg ["dev"]          = {"identifiers": [dev_name+"_cells"],"manufacturer": manufacturer,"model": model,"name": dev_name+"_cells","sw_version": sw_ver}
                         message              = json.dumps(msg)
 
-                        publish.single(state_topic, message, hostname=MQTT_broker, port= MQTT_port, auth=MQTT_auth, qos=0, retain=True)
+                        client.publish(state_topic, message, retain=True)
 
                         b = "...mqtt auto discovery - statistics sensors:" + str(round(config/max_config *100)) +" %"
                         print (b, end="\r")
@@ -693,18 +831,13 @@ def mqtt_discovery():
                         msg                  ={}
                         config               = config +1
 
-        print("...mqtt auto discovery")
+        pytes_serial_log.debug ("...mqtt auto discovery")
 
     except Exception as e:
-        print('...mqtt_discovery error: ' + str(e))
         pytes_serial_log.warning ('MQTT DISCOVERY - error handling message: '  + str(e))
 
 def mqtt_publish():
     try:
-        MQTT_auth = None # type: publish.AuthParameter | None
-        if len(MQTT_username) >0:
-            MQTT_auth = { 'username': MQTT_username, 'password': MQTT_password }
-
         # Publish system topics
         for key, value in json_data.items():
             # We will publish these later
@@ -720,7 +853,7 @@ def mqtt_publish():
                 message = json.dumps(value)
             else:
                 message = json.dumps({'value': value})
-            publish.single(state_topic, message, hostname=MQTT_broker, port=MQTT_port, auth=MQTT_auth)
+            client.publish(state_topic, message)
 
         # Publish device topics
         for device in json_data["devices"]:
@@ -745,7 +878,7 @@ def mqtt_publish():
                     message = json.dumps(value)
                 else:
                     message = json.dumps({'value': value})
-                publish.single(state_topic, message, hostname=MQTT_broker, port=MQTT_port, auth=MQTT_auth)
+                client.publish(state_topic, message)
 
         if cells_monitoring == 'true':
             for device in json_data["cells_data"]:
@@ -772,7 +905,7 @@ def mqtt_publish():
                         message = json.dumps(value)
                     else:
                         message = json.dumps({'value': value})
-                    publish.single(state_topic, message, hostname=MQTT_broker, port=MQTT_port, auth=MQTT_auth)
+                    client.publish(state_topic, message)
 
                 # Publish cell topics
                 for cell in device["cells"]:
@@ -799,12 +932,11 @@ def mqtt_publish():
                             message = json.dumps(value)
                         else:
                             message = json.dumps({'value': value})
-                        publish.single(state_topic, message, hostname=MQTT_broker, port=MQTT_port, auth=MQTT_auth)
+                        client.publish(state_topic, message)
 
-        print ('...mqtt publish  : ok')
+        pytes_serial_log.debug ('...mqtt publish  : ok')
 
     except Exception as e:
-        print ('...mqtt publish error: ' + str(e))
         pytes_serial_log.warning ('MQTT PUBLISH - error handling message: ' + str(e))
 
 def check_events ():
@@ -818,26 +950,26 @@ def check_events ():
             cell_data_req = "false"
 
             if power_events_list[pwr[power-1]['bat_events']][0] == events_mon_level or events_mon_level =="info":
-                print('...bat_event logged  :', str(power_events_list[pwr[power-1]['bat_events']][1]), str(power_events_list[pwr[power-1]['bat_events']][2]))
+                pytes_serial_log.debug (f'...bat_event logged  : {str(power_events_list[pwr[power-1]['bat_events']][1])}, {str(power_events_list[pwr[power-1]['bat_events']][2])}')
 
                 cell_data_req = "true"
                 bat_events_no = bat_events_no + 1
 
             if power_events_list[pwr[power-1]['power_events']][0] == events_mon_level or events_mon_level =="info":
-                print('...power_event logged:', str(power_events_list[pwr[power-1]['power_events']][1]), str(power_events_list[pwr[power-1]['power_events']][2]))
+                pytes_serial_log.debug (f'...power_event logged: {str(power_events_list[pwr[power-1]['power_events']][1])}, {str(power_events_list[pwr[power-1]['power_events']][2])}')
 
                 cell_data_req = "true"
                 pwr_events_no = pwr_events_no + 1
 
             if sys_events_list[pwr[power-1]['sys_events']][0] == events_mon_level or events_mon_level =="info":
-                print('...sys_event logged  :', str(sys_events_list[pwr[power-1]['sys_events']][1]), str(sys_events_list[pwr[power-1]['sys_events']][2]))
+                pytes_serial_log.debug (f'...sys_event logged  : {str(sys_events_list[pwr[power-1]['sys_events']][1])}, {str(sys_events_list[pwr[power-1]['sys_events']][2])}')
 
                 cell_data_req = "true"
                 sys_events_no = sys_events_no + 1
 
             if cell_data_req == "true" and cells_details =='true':
                 if parsing_bat(power)=="true":
-                    print("------------------------------------------------------")
+                    pytes_serial_log.debug ("------------------------------------------------------")
                     headers     = list(bat[0].keys()) + ['bat_events', 'pwr_events', 'sys_events']
                     headers_str = (f'{headers[0].capitalize(): <5}|\
 {headers[1].capitalize(): <4}|\
@@ -853,7 +985,7 @@ def check_events ():
 {headers[11].capitalize(): <10}|\
 {headers[12].capitalize(): <10}|')
 
-                    print(headers_str)
+                    pytes_serial_log.debug (headers_str)
                     battery_events_log.info (headers_str)
 
                     for n in range(cells):
@@ -872,10 +1004,10 @@ def check_events ():
 {cell_data[11]: <10}|\
 {cell_data[12]: <10}|')
                         
-                        print(cell_data_str)
+                        pytes_serial_log.debug (cell_data_str)
                         battery_events_log.info (cell_data_str)
 
-                    print("------------------------------------------------------")
+                    pytes_serial_log.debug ("------------------------------------------------------")
 
                     pass
 
@@ -884,6 +1016,57 @@ def check_events ():
 
     except Exception as e:
         pytes_serial_log.warning ('CHECK EVENTS - error handling message: ' + str(e))
+
+def parsing_stat():
+    try:
+        global line_str_array
+        global parsing_stat_lastexec
+        global parsing_stat_interval
+
+        if (parsing_stat_lastexec == 0) or (time.time() - parsing_stat_lastexec > parsing_stat_interval):
+
+            for power in range (1, powers + 1):
+                pytes_serial_log.debug (f'...parsing_stat: power: {power}')
+
+                req  = ('stat '+ str(power))
+                size = 1500
+                write_return = serial_write(req,size)
+
+                if write_return != 'true':
+                    pytes_serial_log.warning ('PARSING STAT - write_return error handling message: ' + write_return)
+                    return "false"
+
+                read_return = serial_read('Device address','Command')
+
+                if read_return != 'true' or not line_str_array:
+                    pytes_serial_log.warning ('PARSING STAT - read_return error handling message: ' + read_return)
+                    return "false"
+
+                for line_str in line_str_array:
+                    if 'Command completed' in line_str or 'Device address' in line_str:
+                        pytes_serial_log.debug ('Command completed or Device address in line_str -- skipping line')
+                        continue # Skip the last line and the first line
+
+                    if 'CYCLE Times' in line_str:
+                        value = int(line_str[19:28])
+                        pwr[power - 1]['cycle_times'] = int(line_str[19:28])
+                        pytes_serial_log.debug (f'...cycle_times: {value} injected into pwr[{power - 1}][cycle_times]')
+
+                        parsing_stat_lastexec = time.time()
+                        break # No need to continue parsing
+
+                line_str_array = []
+                line_str       = ""
+
+            pytes_serial_log.debug ("...parsing_stat: ok")
+            return "true"
+
+        else:
+            pytes_serial_log.debug ("...parsing_stat: skipped")
+            return "true"
+
+    except Exception as e:
+        pytes_serial_log.error ('PARSING STAT - error handling message: ' + str(e))
 
 def parsing_bat(power):
     try:
@@ -1037,6 +1220,36 @@ def check_cells():
     except Exception as e:
         pytes_serial_log.info ('CHECK CELLS - error handling message: ' + str(e))
 
+def on_connect(client, userdata, flags, rc, properties=None):
+    if rc == 0:
+        pytes_serial_log.info("Connected to MQTT broker successfully")
+        pytes_serial_log.debug ("Connected to MQTT broker successfully")
+    else:
+        pytes_serial_log.warning(f"Connection failed with code {rc}")
+        pytes_serial_log.debug (f"Connection failed with code {rc}")
+
+def on_disconnect(client, userdata, rc, properties=None):
+    if rc != 0:
+        pytes_serial_log.warning(f"Unexpected disconnection (rc={rc}). Reconnecting...")
+        pytes_serial_log.debug (f"Unexpected disconnection (rc={rc}). Reconnecting...")
+
+# Create an MQTT client instance
+client = mqtt.Client(
+    client_id="pytes_mqtt_publisher",
+    callback_api_version=CallbackAPIVersion.VERSION2
+)
+
+client.on_connect = on_connect
+client.on_disconnect = on_disconnect
+
+# Enable automatic reconnection
+client.reconnect_delay_set(min_delay=1, max_delay=120)  # Optional: Set reconnection delays (in seconds)
+
+client.username_pw_set(MQTT_username, MQTT_password)
+client.connect(MQTT_broker, MQTT_port, keepalive=60)
+# Start the loop to process network events
+client.loop_start()  # Runs a thread in the background to handle network events
+
 # --------------------------serial initialization-------------------
 try:
     ser = serial.Serial (port=serial_port,\
@@ -1046,12 +1259,11 @@ try:
           bytesize=serial.EIGHTBITS,\
           timeout=10)
 
-    if ser.portstr: print('...connected to: ' + ser.portstr)
+    if ser.portstr: pytes_serial_log.debug ('...connected to: ' + ser.portstr)
 
 except Exception as e:
-    print('...serial connection error: ' + str(e))
     pytes_serial_log.error ('OPEN SERIAL - error handling message: ' + str(e))
-    print('...program initialisation failed -- exit')
+    pytes_serial_log.error ('...program initialisation failed -- exit')
 
     exit()
 
@@ -1059,7 +1271,7 @@ except Exception as e:
 if MQTT_active =='true':  mqtt_discovery()
 
 #-----------------------------main loop-----------------------------
-print('...program initialisation completed starting main loop')
+pytes_serial_log.debug ('...program initialisation completed starting main loop')
 
 pytes_serial_log.info ('START - ' + version)
 battery_events_log.info ('START - ' + version)
@@ -1071,26 +1283,40 @@ while True:
 
         loops_no       = loops_no +1
 
-        now            = datetime.datetime.now()
-        TimeStamp      = now.strftime("%Y-%m-%d %H:%M:%S")
-        print ('relay local time:', TimeStamp)
+        now            = datetime.datetime.now(datetime.UTC)
+        TimeStamp      = now.strftime("%Y-%m-%d %H:%M:%SZ")
+        pytes_serial_log.debug (f'relay local time: {TimeStamp}')
 
         uptime = round((time.time()- up_time)/86400, 3)
-        print ('serial uptime   :', uptime)
+        pytes_serial_log.debug (f'serial uptime   : {uptime}')
         start_time = time.time()
-
+            
         if errors == 'false':
             parsing_time = time.time()
             parsing_serial()
             parsing_time = time.time() - parsing_time
-            #print(round(parsing_time, 2)) #debug
-            
+            #pytes_serial_log.debug (round(parsing_time, 2)) #debug
+
+        if errors == 'false':
+            parsing_pwrsys_time = time.time()
+            parsing_pwrsys()
+            parsing_pwrsys_time = time.time() - parsing_pwrsys_time
+            parsing_time     = parsing_time + parsing_pwrsys_time
+            #pytes_serial_log.debug (round(parsing_time, 2)) #debug
+
+        if errors == 'false':
+            parsing_stat_time = time.time()
+            parsing_stat()
+            parsing_stat_time = time.time() - parsing_stat_time
+            parsing_time     = parsing_time + parsing_stat_time
+            pytes_serial_log.debug ('parsing_stat_time: ' + str(parsing_stat_time))
+
         if cells_monitoring == 'true' and errors == 'false':
             check_cells_time = time.time()
             check_cells()
             check_cells_time = (time.time() - check_cells_time)
             parsing_time     = parsing_time + check_cells_time
-            #print(round(check_cells_time, 2)) #debug
+            #pytes_serial_log.debug (round(check_cells_time, 2)) #debug
             
         if events_monitoring=='true' and errors == 'false':
             check_events()
@@ -1105,15 +1331,16 @@ while True:
             mqtt_publish_time = time.time()
             mqtt_publish()
             mqtt_publish_time = (time.time() - mqtt_publish_time)
-            #print(round(mqtt_publish_time, 2)) #debug
+            #pytes_serial_log.debug (round(mqtt_publish_time, 2)) #debug
             
         if errors != 'false' :
             errors_no = errors_no + 1
 
-        print ('...serial stat   :', 'loops:' , loops_no, 'errors:', errors_no, 'efficiency:', round((1-(errors_no/loops_no))*100, 2))
-        print ('...serial stat   :', 'bat events_no:' , bat_events_no, 'pwr events_no:', pwr_events_no, 'sys events_no:', sys_events_no)
-        print ('...serial stat   :', 'parsing round-trip:' , round(parsing_time, 2))
-        print ('------------------------------------------------------')
+        pytes_serial_log.debug (f'...serial stat   : loops: {loops_no}, errors: {errors_no}, efficiency: {round((1-(errors_no/loops_no))*100, 2)}')
+        pytes_serial_log.debug (f'...serial stat   : bat events_no: {bat_events_no}, pwr events_no: {pwr_events_no}, sys events_no: {sys_events_no}')
+        pytes_serial_log.debug (f'...serial stat   : parsing round-trip: {round(parsing_time, 2)}')
+        pytes_serial_log.debug ('------------------------------------------------------')
+
 
         #clear variables
         pwr        = []

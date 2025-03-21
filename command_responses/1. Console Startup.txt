@@ -1,0 +1,16 @@
+First, the console must be activated. 
+
+To do this, switch the terminal program to 1200, 8, N, 1.
+Then send the following hex string to the battery:
+
+Data: 7E 32 30 30 31 34 36 38 32 43 30 30 34 38 35 32 30 46 43 43 33 0D
+
+Now switch to 115200,8,N,1 amd send:
+Data: 0D 0A
+
+
+The pylon> prompt appears, allowing you to enter commands
+
+
+For Login Admin mode use : 
+login debug
