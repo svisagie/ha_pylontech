@@ -69,6 +69,8 @@ events_monitoring      = config.get('events_monitoring', 'events_monitoring')
 events_mon_level       = config.get('events_monitoring', 'monitoring_level')
 cells_details          = config.get('events_monitoring', 'cells_details')
 
+parsing_stat_interval = int(config.get('stat_parsing', 'parsing_stat_interval'))
+
 start_time            = time.time()                         # init time
 up_time               = time.time()                         # used to calculate uptime
 pwr                   = []                                  # used to serialise JSON data
@@ -83,7 +85,6 @@ bat_events_no         = 0                                   # used to count numb
 pwr_events_no         = 0                                   # used to count numbers of power events
 sys_events_no         = 0                                   # used to count numbers of system events
 parsing_stat_lastexec = 0                                   # used to calculate parsing_stat execution times
-parsing_stat_interval = 7200                                # used to calculate parsing_stat execution times in seconds
 
 power_events_list = {
 0:["info","0x0","No events"],
@@ -1157,16 +1158,14 @@ def check_cells():
 
 def on_connect(client, userdata, flags, rc, properties=None):
     if rc == 0:
+        client.publish(availability_topic, "online", qos=1, retain=True)
         pytes_serial_log.info("Connected to MQTT broker successfully")
-        pytes_serial_log.debug ("Connected to MQTT broker successfully")
     else:
         pytes_serial_log.warning(f"Connection failed with code {rc}")
-        pytes_serial_log.debug (f"Connection failed with code {rc}")
 
 def on_disconnect(client, userdata, rc, properties=None):
     if rc != 0:
         pytes_serial_log.warning(f"Unexpected disconnection (rc={rc}). Reconnecting...")
-        pytes_serial_log.debug (f"Unexpected disconnection (rc={rc}). Reconnecting...")
 
 def main_loop():
     global errors
@@ -1266,6 +1265,8 @@ client = mqtt.Client(
     callback_api_version=CallbackAPIVersion.VERSION2
 )
 
+availability_topic = "pytes_serial/" + dev_name + "/availability"
+client.will_set(availability_topic, "offline", qos=1, retain=True)
 client.on_connect = on_connect
 client.on_disconnect = on_disconnect
 
