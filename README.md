@@ -2,7 +2,7 @@
 Program is reading RS232 serial port of PYTES and PYLONTECH LiFePo4 batteries.
 
 ### How does this software work?
- "pwr" and "bat" commands are used.
+"pwr", "bat", "pwrsys" and "stat" commands are used.
 Program reads serial port with a specific frequency, parsing the data and saving a JSON file that can be used in further automation. 
 
 Configurable OPTIONS:
@@ -26,6 +26,8 @@ When MQTT is activated:
   If more sensors will be needed, they can be added manually as per Home Assistant documentation [MQTT sensor](https://www.home-assistant.io/integrations/sensor.mqtt/) and the example in docs folder [here](/docs/home_assistant_add_sensor.txt).
 
 You have more [examples](/examples) for better understanding of what program does.
+
+Thanks to [chinezbrun's types_serial](https://github.com/chinezbrun/pytes_serial) from which this was forked and got to where it is now -- possibly a bit more Pylontech centric
 
 ### Installation and Execution
 Serial cable must be connected to battery 1 (master).
