@@ -1,15 +1,19 @@
+version: '3.8'  # Explicitly specify the Compose version
 services:
-  pylon_to_mqtt:
-    container_name: pylon_to_mqtt
-    image: pytes_serial
+  pylon_serial:  # Service name (keep it consistent with intent)
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pylon_serial  # Align with service name (optional, can remove if not needed)
+    image: ghcr.io/svisagie/pylon_serial:beta    # Match service name for clarity
     logging:
       options:
         max-size: "10m"
         max-file: "3"
     restart: unless-stopped
     volumes:
-      - ./pytes_serial.cfg:/app/pytes_serial.cfg
+      - /data/pytes/pytes_serial.cfg:/app/pytes_serial.cfg
     devices:
-      - /dev/serial/by-id/usb-FTDI_FT231X_USB_UART_D30F0GP2-if00-port0:/dev/ttyUSB0
+      - /dev/serial/by-id/usb-Prolific_Technology_Inc._USB-Serial_Controller-if00-port0:/dev/ttyUSB0
     environment:
-      TZ: "Africa/Johannesburg"
+      - TZ=Africa/Johannesburg  # Simplified syntax

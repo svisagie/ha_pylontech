@@ -4,9 +4,11 @@ To do this, switch the terminal program to 1200, 8, N, 1.
 Then send the following hex string to the battery:
 
 Data: 7E 32 30 30 31 34 36 38 32 43 30 30 34 38 35 32 30 46 43 43 33 0D
+or ~20014682C0048520FCC3 as a string followed by CR
+
 
 Now switch to 115200,8,N,1 amd send:
-Data: 0D 0A
+Data: 0D 0A (aka CR LF)
 
 
 The pylon> prompt appears, allowing you to enter commands

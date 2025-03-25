@@ -1,4 +1,6 @@
 #!/usr/bin/env python
+import signal
+import sys
 import traceback
 import logging
 from logging.handlers import RotatingFileHandler
@@ -34,7 +36,7 @@ cells                  = int(config.get('battery_info', 'cells'))
 dev_name              = config.get('battery_info', 'dev_name')
 manufacturer          = config.get('battery_info', 'manufacturer')
 model                 = config.get('battery_info', 'model')
-sw_ver                = "PytesSerial v0.9.0_20250321"
+sw_ver                = "PylonSerial v0.9.0_20250323"
 version               = sw_ver
 
 if reading_freq < 5  : reading_freq = 5
@@ -85,6 +87,7 @@ bat_events_no         = 0                                   # used to count numb
 pwr_events_no         = 0                                   # used to count numbers of power events
 sys_events_no         = 0                                   # used to count numbers of system events
 parsing_stat_lastexec = 0                                   # used to calculate parsing_stat execution times
+sigterm_received      = False                               # used to handle SIGTERM signal
 
 power_events_list = {
 0:["info","0x0","No events"],
@@ -139,27 +142,159 @@ sys_events_list = {
 }
 
 # ------------------------logging definiton ----------------------------
-formatter = logging.Formatter('%(asctime)s | %(levelname)7s | %(message)s ',datefmt='%Y%m%d %H:%M:%S') # logging formating
-def setup_logger(name, log_file, level=LOGGING_LEVEL_FILE):
+logformat = '%(asctime)s | %(levelname)7s | %(message)s '
+dateformat = '%Y%m%d %H:%M:%S'
+formatter = logging.Formatter(logformat,datefmt=dateformat) # logging formating
+logging.basicConfig(
+    level=LOGGING_LEVEL_FILE,  # Root logger only shows WARNING and above
+    format=logformat,
+    datefmt=dateformat
+)
 
-    """To setup as many loggers as you want"""
-    fileHandler = RotatingFileHandler(log_file, mode='a', maxBytes=LOGGING_FILE_MAX_SIZE*1000, backupCount=LOGGING_FILE_MAX_FILES, encoding=None, delay=False)
-    fileHandler.setFormatter(formatter)
-    
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)  
+# Create a specific logger for heartbeat messages
+heartbeat_logger = logging.getLogger('heartbeat')
+heartbeat_logger.setLevel(logging.INFO)  # Set to INFO level
 
-    logger = logging.getLogger(name)
-    logger.setLevel(level)
-    logger.addHandler(fileHandler)
-    logger.addHandler(console_handler)
+# Create a console handler for heartbeat messages
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)  # Allow INFO and above
 
-    return logger
+# Create a formatter
+formatter = logging.Formatter('%(asctime)s - %(message)s')
+console_handler.setFormatter(formatter)
 
-pytes_serial_log    = setup_logger('pytes_serial', 'pytes_serial.log')
-battery_events_log  = setup_logger('battery_events', 'battery_events.log')
+# Add the handler to the heartbeat logger (and avoid propagation to root)
+heartbeat_logger.addHandler(console_handler)
+heartbeat_logger.propagate = False  # Prevent heartbeat logs from going to root logger
+
+# Main app logger
+logger = logging.getLogger('pytes_serial')
 
 # ------------------------functions area----------------------------
+def send_initialization_command():
+    try:
+        # Open the serial port with the specified baud rate (1200)
+        ser = serial.Serial(port=serial_port, baudrate=1200, parity=serial.PARITY_NONE, stopbits=serial.STOPBITS_ONE, bytesize=serial.EIGHTBITS, timeout=10)
+        
+        if not ser.is_open:
+            ser.open()
+            time.sleep(0.5)
+            logger.debug('...opened serial port at 1200 baud')
+
+        # Clear buffers
+        ser.reset_input_buffer()
+        ser.reset_output_buffer()
+
+        # Send initial CR/LF
+        ser.write(b'\r\n')
+        ser.flush()
+        logger.info("Sent initial CR/LF at 1200 baud")
+        time.sleep(1)
+
+        # Read and print the response after initial CR/LF
+        response = ""
+        start_time = time.time()
+        while (time.time() - start_time) < 2:  # 2 seconds timeout
+            if ser.in_waiting > 0:
+                response += ser.read(ser.in_waiting).decode('latin-1')
+        print("Response after initial CR/LF:", response)
+
+        # Send the initialization command
+        command = "~20014682C0048520FCC3\r"
+        ser.write(command.encode('latin-1'))
+        ser.flush()
+        logger.info("Sent initialization command at 1200 baud")
+        time.sleep(1)
+
+        # Change the baud rate to 115200
+        ser.baudrate = 115200
+        logger.debug('...changed serial port to 115200 baud')
+
+        # Send CR/LF
+        ser.write(b'\r\n')
+        ser.flush()
+        logger.info("Sent CR/LF at 115200 baud")
+
+        # Wait for the response
+        start_time = time.time()
+        response = ""
+        while (time.time() - start_time) < 10:  # 10 seconds timeout
+            if ser.in_waiting > 0:
+                response += ser.read(ser.in_waiting).decode('latin-1')
+                if "pylon" in response.lower():
+                    logger.info("Received expected response containing 'pylon'")
+                    
+                    # Send "login debug\n" command
+                    ser.write(b'login debug\n')
+                    ser.flush()
+                    logger.info("Sent 'login debug' command")
+
+                    # Read and log the response
+                    login_response = ""
+                    start_time = time.time()
+                    while (time.time() - start_time) < 10:  # 10 seconds timeout
+                        if ser.in_waiting > 0:
+                            login_response += ser.read(ser.in_waiting).decode('latin-1')
+                            if "login debug" in login_response.lower():
+                                logger.info(f"Response after 'login debug': {login_response}")
+                                return True
+                    logger.warning("Did not receive expected response after 'login debug'")
+                    return False
+            time.sleep(0.1)
+
+        logger.warning("Did not receive expected response containing 'pylon'")
+        return False
+
+    except Exception as e:
+        logger.exception(f"Error in send_initialization_command: {str(e)}")
+        return False
+
+    finally:
+        if ser.is_open:
+            ser.close()
+            logger.debug('...closed serial port')
+            
+def check_pylon_console():
+    try:
+        # Open the serial port with the specified baud rate
+        ser = serial.Serial(port=serial_port, baudrate=115200, parity=serial.PARITY_NONE, stopbits=serial.STOPBITS_ONE, bytesize=serial.EIGHTBITS, timeout=10)
+        
+        if not ser.is_open:
+            ser.open()
+            time.sleep(0.5)
+            logger.debug('...opened serial port')
+
+        # Clear buffers
+        ser.reset_input_buffer()
+        ser.reset_output_buffer()
+
+        # Send the "help" command
+        ser.write(b'help\r\n')
+        ser.flush()
+
+        # Wait for the response
+        start_time = time.time()
+        response = ""
+        while (time.time() - start_time) < 10:  # 10 seconds timeout
+            if ser.in_waiting > 0:
+                response += ser.read(ser.in_waiting).decode('latin-1')
+                if "pylon" in response.lower():
+                    logger.info("Received expected response containing 'pylon'")
+                    return True
+            time.sleep(0.1)
+
+        logger.warning("Did not receive expected response containing 'pylon'")
+        return False
+
+    except Exception as e:
+        logger.exception(f"Error in send_help_command: {str(e)}")
+        return False
+
+    finally:
+        if ser.is_open:
+            ser.close()
+            logger.debug('...closed serial port')
+
 def serial_sendcommand(req, start, stop, timeout=10):
     global errors
     
@@ -180,7 +315,7 @@ def serial_sendcommand(req, start, stop, timeout=10):
         if not ser.is_open:
             ser.open()
             time.sleep(0.5)
-            pytes_serial_log.debug('...opened serial port')
+            logger.debug('...opened serial port')
 
         # Clear buffers
         ser.reset_input_buffer()
@@ -194,11 +329,11 @@ def serial_sendcommand(req, start, stop, timeout=10):
         # Wait for initial response
         while (time.time() - start_time) < 1:
             if ser.in_waiting > 0:
-                pytes_serial_log.debug(f'...command sent, buffer has data after {round(time.time() - start_time, 2)}s')
+                logger.debug(f'...command sent, buffer has data after {round(time.time() - start_time, 2)}s')
                 break
             time.sleep(0.1)
         else:
-            pytes_serial_log.debug('...timeout waiting for initial response')
+            logger.debug('...timeout waiting for initial response')
             return CommandResult(False)
 
         # Read response
@@ -211,7 +346,7 @@ def serial_sendcommand(req, start, stop, timeout=10):
                 try:
                     decoded_line = line.decode('latin-1').strip()
                 except UnicodeDecodeError:
-                    pytes_serial_log.warning(f"Failed to decode line: {line}")
+                    logger.warning(f"Failed to decode line: {line}")
                     continue
 
                 # Handle start/stop conditions
@@ -222,21 +357,18 @@ def serial_sendcommand(req, start, stop, timeout=10):
                     line_str_array.append(decoded_line)
                     
                     if stop in decoded_line:
-                        pytes_serial_log.debug(f'...found stop condition after {round(time.time() - start_time, 2)}s, total exec_time: {round(time.time() - serial_exec_time, 2)}s')
+                        logger.debug(f'...found stop condition after {round(time.time() - start_time, 2)}s, total exec_time: {round(time.time() - serial_exec_time, 2)}s')
                         return CommandResult(True, line_str_array)
 
             time.sleep(0.01)
 
-        pytes_serial_log.debug('...timeout reached')
+        logger.debug('...timeout reached')
         return CommandResult(False)
 
     except Exception as e:
         errors = True
-        pytes_serial_log.warning(
-            f"SERIAL SENDCOMMAND serial_sendcommand('{req}', '{orig_start}', '{orig_stop}') - "
-            f"error: {str(e)}"
-        )
-        pytes_serial_log.debug(f'SERIAL SENDCOMMAND - array: {line_str_array}')
+        logger.exception(f"SERIAL SENDCOMMAND serial_sendcommand('{req}', '{orig_start}', '{orig_stop}') - error: {str(e)}")
+        logger.debug(f'SERIAL SENDCOMMAND - array: {line_str_array}')
         return CommandResult(False)
 
 def seconds_to_duration(seconds):
@@ -340,27 +472,27 @@ def parsing_pwrsys():
 
             if 'Command completed' in line_str:   # mark end of the block
                 try:
-                    pytes_serial_log.debug ('--------- PWRSYS ----------')
-                    pytes_serial_log.debug (f'banks_total               : {banks_total}')
-                    pytes_serial_log.debug (f'banks_current             : {banks_current}')
-                    pytes_serial_log.debug (f'banks_sleep               : {banks_sleep}')
-                    pytes_serial_log.debug (f'system_volt               : {system_voltage}')
-                    pytes_serial_log.debug (f'system_current            : {system_current}')
-                    pytes_serial_log.debug (f'system_rc                 : {system_rc}')
-                    pytes_serial_log.debug (f'current_fcc               : {system_fcc}')
-                    pytes_serial_log.debug (f'system_soc                : {system_soc}')
-                    pytes_serial_log.debug (f'system_soh                : {system_soh}')
-                    pytes_serial_log.debug (f'system_highest_voltage    : {system_highest_voltage}')
-                    pytes_serial_log.debug (f'system_average_voltage    : {system_average_voltage}')
-                    pytes_serial_log.debug (f'system_lowest_voltage     : {system_lowest_voltage}')
-                    pytes_serial_log.debug (f'system_highest_temp       : {system_highest_temp}')
-                    pytes_serial_log.debug (f'system_average_temp       : {system_average_temp}')
-                    pytes_serial_log.debug (f'system_lowest_temp        : {system_lowest_temp}')
-                    pytes_serial_log.debug (f'system_recommend_chg_volt : {system_recommend_chg_volt}')
-                    pytes_serial_log.debug (f'system_recommend_dsg_volt : {system_recommend_dsg_volt}')
-                    pytes_serial_log.debug (f'system_recommend_chg_curr : {system_recommend_chg_curr}')
-                    pytes_serial_log.debug (f'system_recommend_dsg_curr : {system_recommend_dsg_curr}')
-                    pytes_serial_log.debug ('---------------------------')
+                    logger.debug ('--------- PWRSYS ----------')
+                    logger.debug (f'banks_total               : {banks_total}')
+                    logger.debug (f'banks_current             : {banks_current}')
+                    logger.debug (f'banks_sleep               : {banks_sleep}')
+                    logger.debug (f'system_volt               : {system_voltage}')
+                    logger.debug (f'system_current            : {system_current}')
+                    logger.debug (f'system_rc                 : {system_rc}')
+                    logger.debug (f'current_fcc               : {system_fcc}')
+                    logger.debug (f'system_soc                : {system_soc}')
+                    logger.debug (f'system_soh                : {system_soh}')
+                    logger.debug (f'system_highest_voltage    : {system_highest_voltage}')
+                    logger.debug (f'system_average_voltage    : {system_average_voltage}')
+                    logger.debug (f'system_lowest_voltage     : {system_lowest_voltage}')
+                    logger.debug (f'system_highest_temp       : {system_highest_temp}')
+                    logger.debug (f'system_average_temp       : {system_average_temp}')
+                    logger.debug (f'system_lowest_temp        : {system_lowest_temp}')
+                    logger.debug (f'system_recommend_chg_volt : {system_recommend_chg_volt}')
+                    logger.debug (f'system_recommend_dsg_volt : {system_recommend_dsg_volt}')
+                    logger.debug (f'system_recommend_chg_curr : {system_recommend_chg_curr}')
+                    logger.debug (f'system_recommend_dsg_curr : {system_recommend_dsg_curr}')
+                    logger.debug ('---------------------------')
 
                     line_str_array = []
                     line_str       = ""
@@ -369,14 +501,14 @@ def parsing_pwrsys():
 
                 except Exception as e:
                     errors = 'true'
-                    pytes_serial_log.warning ('PARSING SERIAL - error handling message: '+str(e))
+                    logger.exception (f'PARSING SERIAL - error handling message: {str(e)}')
 
-        pytes_serial_log.info ('...parsing_pwrsys: ok')
+        logger.info ('...parsing_pwrsys: ok')
         return "true"
 
     except Exception as e:
         errors = 'true'
-        pytes_serial_log.info ('PARSING BAT - error handling message: ' + str(e))
+        logger.exception (f'PARSING BAT - error handling message: {str(e)}')
 
 def parsing_serial():
     try:
@@ -401,7 +533,7 @@ def parsing_serial():
 
             result = serial_sendcommand(req, req, 'Command completed')
             if result.success == False:
-                pytes_serial_log.warning ('...parsing_serial: error')
+                logger.warning ('...parsing_serial: error')
                 return "false"
             
             for line_str in result.response:
@@ -422,22 +554,22 @@ def parsing_serial():
 
                 if 'Command completed' in line_str:   # mark end of the block
                     try:
-                        pytes_serial_log.debug (f'--------- PWR ({power}) ----------')
-                        pytes_serial_log.debug (f'Voltage         : {voltage}')
-                        pytes_serial_log.debug (f'Current         : {current}')
-                        pytes_serial_log.debug (f'Temperature     : {temp}')
-                        pytes_serial_log.debug (f'SOC [%]         : {soc}')
-                        pytes_serial_log.debug (f'Basic Status    : {basic_st}')
-                        pytes_serial_log.debug (f'Volt Status     : {volt_st}')
-                        pytes_serial_log.debug (f'Current Status  : {current_st}')
-                        pytes_serial_log.debug (f'Tmpr. Status    : {temp_st}')
-                        pytes_serial_log.debug (f'Coul. Status    : {coul_st}')
-                        pytes_serial_log.debug (f'Soh. Status     : {soh_st}')
-                        pytes_serial_log.debug (f'Heater Status   : {heater_st}')
-                        pytes_serial_log.debug (f'Bat Events      : {bat_events}')
-                        pytes_serial_log.debug (f'Power Events    : {power_events}')
-                        pytes_serial_log.debug (f'System Fault    : {sys_events}')
-                        pytes_serial_log.debug ('---------------------------')
+                        logger.debug (f'--------- PWR ({power}) ----------')
+                        logger.debug (f'Voltage         : {voltage}')
+                        logger.debug (f'Current         : {current}')
+                        logger.debug (f'Temperature     : {temp}')
+                        logger.debug (f'SOC [%]         : {soc}')
+                        logger.debug (f'Basic Status    : {basic_st}')
+                        logger.debug (f'Volt Status     : {volt_st}')
+                        logger.debug (f'Current Status  : {current_st}')
+                        logger.debug (f'Tmpr. Status    : {temp_st}')
+                        logger.debug (f'Coul. Status    : {coul_st}')
+                        logger.debug (f'Soh. Status     : {soh_st}')
+                        logger.debug (f'Heater Status   : {heater_st}')
+                        logger.debug (f'Bat Events      : {bat_events}')
+                        logger.debug (f'Power Events    : {power_events}')
+                        logger.debug (f'System Fault    : {sys_events}')
+                        logger.debug ('---------------------------')
 
                         pwr_array = {
                                     'power': power,
@@ -458,12 +590,12 @@ def parsing_serial():
                         
                         data_set       = data_set + 1
                         pwr.append(pwr_array)
-                        pytes_serial_log.info(f'...parsing_serial: power {power} - ok')                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
+                        logger.info(f'...parsing_serial: power {power} - ok')                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
 
                         break
 
                     except Exception as e:
-                        pytes_serial_log.warning ('PARSING SERIAL - error handling message: '+str(e))
+                        logger.exception (f'PARSING SERIAL - error handling message: {str(e)}')
 
             if data_set != power:
                 break
@@ -473,22 +605,21 @@ def parsing_serial():
             errors='false'
             trials=0
 
-            pytes_serial_log.info(f'...parsing_serial: ok')
+            logger.info(f'...parsing_serial: ok')
             return "true"
 
         else:
-            pytes_serial_log.warning (f'...parsing_serial: data_set({data_set}) != powers({powers}) error')
+            logger.warning (f'...parsing_serial: data_set({data_set}) != powers({powers}) error')
             errors = 'true'
             return
 
     except Exception as e:
         errors = 'true'
-
-        pytes_serial_log.error ('PARSING SERIAL - error handling message: '+str(e))
+        logger.exception (f'PARSING SERIAL - error handling message: {str(e)}')
 
         if ser.is_open == True:
             ser.close()
-            pytes_serial_log.debug ('...close serial')
+            logger.debug ('...close serial')
 
         return
 
@@ -519,7 +650,7 @@ def statistics():
         
     except Exception as e:
         errors = 'true'
-        pytes_serial_log.exception ('...json serialization error: ' + str(e))
+        logger.exception (f'...json serialization error: {str(e)}')
 
 def json_serialize():
     try:
@@ -571,10 +702,10 @@ def json_serialize():
 
         with open(output_path + dev_name + '_status.json', 'w') as outfile:
             json.dump(json_data, outfile)
-        pytes_serial_log.debug ('...json creation:  ok')
+        logger.debug ('...json creation:  ok')
 
     except Exception as e:
-        pytes_serial_log.error ('JSON SERIALIZATION - error handling message: ' + str(e))
+        logger.exception (f'JSON SERIALIZATION - error handling message: {str(e)}')
 
         errors = 'true'
 
@@ -621,11 +752,10 @@ def maria_db():
 
         mycursor.close()
         mydb.close()
-        pytes_serial_log.debug ('...mariadb upload: ok')
+        logger.debug ('...mariadb upload: ok')
 
     except Exception as e:
-        pytes_serial_log.debug ('...mariadb writing error: '+ str(e))
-        pytes_serial_log.warning ('MARIADB WRITING - error handling message: '+ str(e))
+        logger.exception (f'MARIADB WRITING - error handling message: {str(e)}')
 
 def mqtt_discovery():
     try:
@@ -666,13 +796,13 @@ def mqtt_discovery():
             msg                  = {}
             config               = config +1
 
-        pytes_serial_log.debug ("...mqtt auto discovery")
+        logger.debug ("...mqtt auto discovery")
 
         # define individual batteries sensors
         names        =["Current",       "Voltage" ,     "Temperature",  "SOC",          "Status",   "Cycles"]
         ids          =["current",       "voltage" ,     "temperature",  "soc",          "basic_st", "cycle_times"]
         dev_cla      =["current",       "voltage",      "temperature",  "battery",      None,       None]
-        stat_cla     =["measurement",   "measurement",  "measurement",  "measurement",  None,       None]
+        stat_cla     =["measurement",   "measurement",  "measurement",  "measurement",  None,       "measurement"]
         unit_of_meas =["A",             "V",            "°C",           "%",            None,       None]
 
         max_config   = max_config + powers*len(ids)
@@ -703,7 +833,7 @@ def mqtt_discovery():
                 config               = config +1
                 #max_config           = len(ids)+ powers*len(ids)
 
-        pytes_serial_log.debug ("...mqtt auto discovery")
+        logger.debug ("...mqtt auto discovery")
 
         # define individual cells sensors
         if cells_monitoring == 'true':
@@ -765,7 +895,7 @@ def mqtt_discovery():
             # only for medium and high monitoring level
             if cells_mon_level == 'medium' or cells_mon_level == 'high':
                 
-                pytes_serial_log.debug ("...mqtt auto discovery")
+                logger.debug ("...mqtt auto discovery")
                 
                 # define individual cells sensors -- statistics
                 names        =["voltage_delta", "voltage_min",  "voltage_max",  "temperature_delta",    "temperature_min",  "temperature_max"]
@@ -801,10 +931,10 @@ def mqtt_discovery():
                         msg                  ={}
                         config               = config +1
 
-        pytes_serial_log.debug ("...mqtt auto discovery")
+        logger.debug ("...mqtt auto discovery")
 
     except Exception as e:
-        pytes_serial_log.warning ('MQTT DISCOVERY - error handling message: '  + str(e))
+        logger.exception (f'MQTT DISCOVERY - error handling message: {str(e)}')
 
 def mqtt_publish():
     try:
@@ -839,6 +969,7 @@ def mqtt_publish():
                     json_data_old and
                     len(json_data["devices"]) == powers and
                     len(json_data_old["devices"]) == powers and
+                    key in json_data_old["devices"][device["power"] - 1] and
                     value == json_data_old["devices"][device["power"] - 1][key]
                 ):
                     continue
@@ -904,10 +1035,10 @@ def mqtt_publish():
                             message = json.dumps({'value': value})
                         client.publish(state_topic, message)
 
-        pytes_serial_log.debug ('...mqtt publish  : ok')
+        logger.debug ('...mqtt publish  : ok')
 
     except Exception as e:
-        pytes_serial_log.warning ('MQTT PUBLISH - error handling message: ' + str(e))
+        logger.exception (f'MQTT PUBLISH - error handling message: {str(e)}')
 
 def check_events ():
     try:
@@ -920,38 +1051,37 @@ def check_events ():
             cell_data_req = "false"
 
             if power_events_list[pwr[power-1]['bat_events']][0] == events_mon_level or events_mon_level =="info":
-                pytes_serial_log.warning (f'...bat_event logged  : {str(power_events_list[pwr[power-1]['bat_events']][1])}, {str(power_events_list[pwr[power-1]['bat_events']][2])}')
+                logger.warning (f'...bat_event logged  : {str(power_events_list[pwr[power-1]['bat_events']][1])}, {str(power_events_list[pwr[power-1]['bat_events']][2])}')
 
                 cell_data_req = "true"
                 bat_events_no = bat_events_no + 1
 
             if power_events_list[pwr[power-1]['power_events']][0] == events_mon_level or events_mon_level =="info":
-                pytes_serial_log.warning (f'...power_event logged: {str(power_events_list[pwr[power-1]['power_events']][1])}, {str(power_events_list[pwr[power-1]['power_events']][2])}')
+                logger.warning (f'...power_event logged: {str(power_events_list[pwr[power-1]['power_events']][1])}, {str(power_events_list[pwr[power-1]['power_events']][2])}')
 
                 cell_data_req = "true"
                 pwr_events_no = pwr_events_no + 1
 
             if sys_events_list[pwr[power-1]['sys_events']][0] == events_mon_level or events_mon_level =="info":
-                pytes_serial_log.warning (f'...sys_event logged  : {str(sys_events_list[pwr[power-1]['sys_events']][1])}, {str(sys_events_list[pwr[power-1]['sys_events']][2])}')
+                logger.warning (f'...sys_event logged  : {str(sys_events_list[pwr[power-1]['sys_events']][1])}, {str(sys_events_list[pwr[power-1]['sys_events']][2])}')
 
                 cell_data_req = "true"
                 sys_events_no = sys_events_no + 1
 
             if cell_data_req == "true" and cells_details =='true':
                 if parsing_bat(power)=="true":
-                    pytes_serial_log.warning (f"--------------------- BAT ({power}) ----------------------")
+                    logger.warning (f"--------------------- BAT ({power}) ----------------------")
                     for cell in bat:
-                        pytes_serial_log.warning (cell)
-                    pytes_serial_log.warning ("-----------------------------------------------------")
+                        logger.warning (cell)
+                    logger.warning ("-----------------------------------------------------")
 
                     pass
 
                 else:
-                    battery_events_log.info ('CHECK EVENTS - power_'+ str(power)+' cells details:cells data could not be read')
+                    logger.info ('CHECK EVENTS - power_'+ str(power)+' cells details:cells data could not be read')
 
     except Exception as e:
-        error_trace = traceback.format_exc()
-        pytes_serial_log.warning (f'CHECK EVENTS - error handling message: {str(e)}\nTraceback:\n{error_trace}')
+        logger.exception (f'CHECK EVENTS - error handling message: {str(e)}')
 
 def parsing_stat():
     try:
@@ -962,50 +1092,50 @@ def parsing_stat():
         if (parsing_stat_lastexec == 0) or (time.time() - parsing_stat_lastexec > parsing_stat_interval):
 
             for power in range (1, powers + 1):
-                pytes_serial_log.info (f'...parsing_stat: power: {power}')
+                logger.info (f'...parsing_stat: power: {power}')
 
                 req  = ('stat '+ str(power))
                 result = serial_sendcommand(req, 'Device address', 'Command completed')
                 if result.success == False:
-                    pytes_serial_log.warning ('PARSING STAT - error')
+                    logger.warning ('PARSING STAT - error')
                     return "false"
                 
                 for line_str in result.response:
                     value = int(line_str[18:27])
                     if 'Command completed' in line_str or 'Device address' in line_str:
-                        pytes_serial_log.debug ('Command completed or Device address in line_str -- skipping line')
+                        logger.debug ('Command completed or Device address in line_str -- skipping line')
                         continue # Skip the last line and the first line
 
                     if 'Data Items      :' in line_str:
                         pwr[power - 1]['data_items'] = value
-                        pytes_serial_log.debug (f'...data_items: {value} injected into pwr[{power - 1}][data_items]')
+                        logger.debug (f'...data_items: {value} injected into pwr[{power - 1}][data_items]')
                     if 'HisData Items   :' in line_str:
                         pwr[power - 1]['histdata_items'] = value
-                        pytes_serial_log.debug (f'...histdata_items: {value} injected into pwr[{power - 1}][histdata_items]')
+                        logger.debug (f'...histdata_items: {value} injected into pwr[{power - 1}][histdata_items]')
                     if 'MiscData Items  :' in line_str:
                         pwr[power - 1]['miscdata_item'] = value
-                        pytes_serial_log.debug (f'...miscdata_item: {value} injected into pwr[{power - 1}][miscdata_item]')
+                        logger.debug (f'...miscdata_item: {value} injected into pwr[{power - 1}][miscdata_item]')
 
                     if 'CYCLE Times     :' in line_str:
                         pwr[power - 1]['cycle_times'] = value
-                        pytes_serial_log.debug (f'...cycle_times: {value} injected into pwr[{power - 1}][cycle_times]')
+                        logger.debug (f'...cycle_times: {value} injected into pwr[{power - 1}][cycle_times]')
 
                         parsing_stat_lastexec = time.time()
                         break # No need to continue parsing
 
                 line_str       = ""
-                pytes_serial_log.info (f"...parsing_stat: power {power} - ok")
+                logger.info (f"...parsing_stat: power {power} - ok")
 
-            pytes_serial_log.info ("...parsing_stat: ok")
+            logger.info ("...parsing_stat: ok")
             return "true"
 
         else:
-            pytes_serial_log.info (f"...parsing_stat: skipped. Last exectution was { seconds_to_duration(int(time.time() - parsing_stat_lastexec)) } ago. Next execution in { seconds_to_duration(int(parsing_stat_interval - (time.time() - parsing_stat_lastexec))) }.")
+            logger.info (f"...parsing_stat: skipped. Last exectution was { seconds_to_duration(int(time.time() - parsing_stat_lastexec)) } ago. Next execution in { seconds_to_duration(int(parsing_stat_interval - (time.time() - parsing_stat_lastexec))) }.")
             return "true"
 
     except Exception as e:
         errors = 'true'
-        pytes_serial_log.error ('PARSING STAT - error handling message: ' + str(e))
+        logger.exception (f'PARSING STAT - error handling message: {str(e)}')
 
 def parsing_bat(power):
     try:
@@ -1013,12 +1143,12 @@ def parsing_bat(power):
         global bat
         bat = []
 
-        pytes_serial_log.info (f'...parsing_bat: power: {power}')
+        logger.info (f'...parsing_bat: power: {power}')
 
         req  = ('bat '+ str(power))
         result = serial_sendcommand(req, 'Battery', 'Command completed')
         if result.success == False:
-            pytes_serial_log.warning ('PARSING BAT - error')
+            logger.warning ('PARSING BAT - error')
             return "false"
         
         cell_idx        = -1
@@ -1098,15 +1228,15 @@ def parsing_bat(power):
                     cell_data['coulomb']        = int(line[coulomb_idx][:-4]) / 1000    # Ah
 
                 bat.append(cell_data)
-                pytes_serial_log.debug (cell_data)
+                logger.debug (cell_data)
 
-        pytes_serial_log.debug ('---------------------------')
-        pytes_serial_log.info(f'...parsing_bat: power {power} - ok')
+        logger.debug ('---------------------------')
+        logger.info(f'...parsing_bat: power {power} - ok')
         return "true"
 
     except Exception as e:
         errors = 'true'
-        pytes_serial_log.info ('PARSING BAT - error handling message: ' + str(e))
+        logger.exception (f'PARSING BAT - error handling message: {str(e)}')
 
 def check_cells():
     try:
@@ -1154,20 +1284,21 @@ def check_cells():
                 pass
 
     except Exception as e:
-        pytes_serial_log.info ('CHECK CELLS - error handling message: ' + str(e))
+        logger.exception (f'CHECK CELLS - error handling message: {str(e)}')
 
 def on_connect(client, userdata, flags, rc, properties=None):
     if rc == 0:
         client.publish(availability_topic, "online", qos=1, retain=True)
-        pytes_serial_log.info("Connected to MQTT broker successfully")
+        logger.info("Connected to MQTT broker successfully")
     else:
-        pytes_serial_log.warning(f"Connection failed with code {rc}")
+        logger.warning(f"Connection failed with code {rc}")
 
 def on_disconnect(client, userdata, rc, properties=None):
     if rc != 0:
-        pytes_serial_log.warning(f"Unexpected disconnection (rc={rc}). Reconnecting...")
+        logger.warning(f"Unexpected disconnection (rc={rc}). Reconnecting...")
 
 def main_loop():
+    global sigterm_received
     global errors
     global trials
     global pwr
@@ -1183,19 +1314,23 @@ def main_loop():
     global TimeStamp    
     global uptime
 
+    heartbeat_logger.info ('...main loop starting')
     try:
         while True:
             time.sleep(0.2)
-            if (time.time() - start_time) > reading_freq:
+            if (sigterm_received == True):
+                heartbeat_logger.info ('...SIGTERM received - exiting now!')
+                exit()
 
+            if start_time - up_time < 1 or (time.time() - start_time) > reading_freq:
                 loops_no       = loops_no +1
 
                 now            = datetime.datetime.now(datetime.UTC)
                 TimeStamp      = now.strftime("%Y-%m-%d %H:%M:%SZ")
-                pytes_serial_log.debug (f'relay local time: {TimeStamp}')
+                logger.debug (f'relay local time: {TimeStamp}')
 
                 uptime = round((time.time()- up_time)/86400, 3)
-                pytes_serial_log.debug (f'serial uptime   : {uptime}')
+                logger.debug (f'serial uptime   : {uptime}')
                 start_time = time.time()
                     
                 if errors == 'false':
@@ -1216,7 +1351,7 @@ def main_loop():
                     parsing_stat()
                     parsing_stat_time = time.time() - parsing_stat_time
                     parsing_time     = parsing_time + parsing_stat_time
-                    pytes_serial_log.debug ('parsing_stat_time: ' + str(parsing_stat_time))
+                    logger.debug ('parsing_stat_time: ' + str(parsing_stat_time))
 
                 if cells_monitoring == 'true' and errors == 'false':
                     check_cells_time = time.time()
@@ -1243,10 +1378,10 @@ def main_loop():
                 if errors != 'false' :
                     errors_no = errors_no + 1
 
-                pytes_serial_log.info (f'...serial stat   : loops: {loops_no}, errors: {errors_no}, efficiency: {round((1-(errors_no/loops_no))*100, 2)}')
-                pytes_serial_log.info (f'...serial stat   : bat events_no: {bat_events_no}, pwr events_no: {pwr_events_no}, sys events_no: {sys_events_no}')
-                pytes_serial_log.info (f'...serial stat   : parsing round-trip: {round(parsing_time, 2)}')
-                pytes_serial_log.info ('------------------------------------------------------')
+                heartbeat_logger.info (f'...serial stat   : loops: {loops_no}, errors: {errors_no}, efficiency: {round((1-(errors_no/loops_no))*100, 2)}')
+                heartbeat_logger.info (f'...serial stat   : bat events_no: {bat_events_no}, pwr events_no: {pwr_events_no}, sys events_no: {sys_events_no}')
+                heartbeat_logger.info (f'...serial stat   : parsing round-trip: {round(parsing_time, 2)}')
+                heartbeat_logger.info ('------------------------------------------------------')
 
 
                 #clear variables
@@ -1256,8 +1391,9 @@ def main_loop():
                 trials     = 0
 
     except Exception as e:
-        pytes_serial_log.error ('MAIN LOOP - error handling message: ' + str(e))
+        logger.exception (f'MAIN LOOP - error handling message: {str(e)}')
 
+heartbeat_logger.info ('START - ' + version)
 
 # Create an MQTT client instance
 client = mqtt.Client(
@@ -1278,7 +1414,17 @@ client.connect(MQTT_broker, MQTT_port, keepalive=60)
 # Start the loop to process network events
 client.loop_start()  # Runs a thread in the background to handle network events
 
+
+# Define shutdown handler
+def shutdown_handler(signum, frame):
+    global sigterm_received
+    sigterm_received = True
+
+# Register the handler
+signal.signal(signal.SIGTERM, shutdown_handler)
+
 # --------------------------serial initialization-------------------
+heartbeat_logger.info ('...serial initialisation starting')
 try:
     ser = serial.Serial (port=serial_port,\
           baudrate=serial_baudrate,\
@@ -1287,23 +1433,29 @@ try:
           bytesize=serial.EIGHTBITS,\
           timeout=10)
 
-    if ser.portstr: pytes_serial_log.debug ('...connected to: ' + ser.portstr)
+    if ser.portstr: 
+        heartbeat_logger.info ('...connected to: ' + ser.portstr)
 
 except Exception as e:
-    pytes_serial_log.error ('OPEN SERIAL - error handling message: ' + str(e))
-    pytes_serial_log.error ('...program initialisation failed -- exit')
-
+    logger.exception (f'OPEN SERIAL - error handling message: {str(e)}\n...program initialisation failed -- exit')
     exit()
 
 # --------------------------mqtt auto discovery (HA)----------------
-if MQTT_active =='true':  mqtt_discovery()
+if MQTT_active =='true':  
+    heartbeat_logger.info ('...mqtt auto discovery starting')
+    mqtt_discovery()
+    heartbeat_logger.info ('...mqtt auto discovery completed')
 
 #-----------------------------main loop-----------------------------
-pytes_serial_log.debug ('...program initialisation completed starting main loop')
+heartbeat_logger.info ('...program initialisation completed starting main loop')
 
-pytes_serial_log.info ('START - ' + version)
-battery_events_log.info ('START - ' + version)
 json_data = {}
+
+if check_pylon_console() == False:
+    if send_initialization_command() == False:
+        print ("Initialization failed")
+        exit()
+
 
 main_loop()
 
