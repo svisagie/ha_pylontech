@@ -27,7 +27,7 @@ When MQTT is activated:
 
 You have more [examples](/examples) for better understanding of what program does.
 
-Thanks to [chinezbrun's types_serial](https://github.com/chinezbrun/pytes_serial) from which this was forked and got to where it is now -- possibly a bit more Pylontech centric
+Thanks to [chinezbrun's pytes_serial](https://github.com/chinezbrun/pytes_serial) from which this was forked and got to where it is now -- possibly a bit more Pylontech centric
 
 ### Installation and Execution
 Serial cable must be connected to battery 1 (master).
